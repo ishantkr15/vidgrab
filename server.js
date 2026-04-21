@@ -1,23 +1,57 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const { execFile, spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// yt-dlp binary path from youtube-dl-exec package
+// yt-dlp binary path
 const ytDlpPath = require('youtube-dl-exec').constants.YOUTUBE_DL_PATH;
 
 console.log('yt-dlp binary:', ytDlpPath);
 console.log('ffmpeg binary:', ffmpegPath);
 
+// ============================================================
+// Cookie Support: Write YT_COOKIES env var to a file
+// ============================================================
+const COOKIES_FILE = path.join(os.tmpdir(), 'yt_cookies.txt');
+
+function setupCookies() {
+    const cookieData = process.env.YT_COOKIES;
+    if (cookieData) {
+        fs.writeFileSync(COOKIES_FILE, cookieData, 'utf8');
+        console.log('✅ YouTube cookies loaded from environment');
+        return true;
+    }
+    console.log('⚠️  No YT_COOKIES env var found. YouTube may block requests.');
+    return false;
+}
+
+const hasCookies = setupCookies();
+
+// Base args that every yt-dlp call should include
+function getBaseArgs() {
+    const args = [
+        '--no-check-certificates',
+        '--no-warnings',
+        '--ffmpeg-location', ffmpegPath,
+        '--extractor-args', 'youtube:player_client=web',
+    ];
+    if (hasCookies) {
+        args.push('--cookies', COOKIES_FILE);
+    }
+    return args;
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Helper: run yt-dlp safely using execFile (no shell, no arg splitting)
+// Helper: run yt-dlp safely using execFile (no shell)
 function runYtDlp(args) {
     return new Promise((resolve, reject) => {
         execFile(ytDlpPath, args, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
@@ -59,9 +93,7 @@ app.get('/api/info', async (req, res) => {
         const args = [
             url,
             '--dump-single-json',
-            '--no-check-certificates',
-            '--no-warnings',
-            '--ffmpeg-location', ffmpegPath,
+            ...getBaseArgs(),
         ];
 
         const stdout = await runYtDlp(args);
@@ -148,7 +180,7 @@ app.get('/api/info', async (req, res) => {
         });
     } catch (err) {
         console.error('❌ Error fetching video info:', err.message);
-        res.status(500).json({ error: 'Failed to fetch video info. Make sure it\'s a valid YouTube URL.' });
+        res.status(500).json({ error: 'Failed to fetch video info. Please try again.' });
     }
 });
 
@@ -176,34 +208,18 @@ app.get('/api/download', (req, res) => {
         url,
         '-f', formatId,
         '-o', '-',
-        '--no-check-certificates',
-        '--no-warnings',
-        '--ffmpeg-location', ffmpegPath,
+        ...getBaseArgs(),
     ];
 
-    // Use spawn with shell:false (default) to avoid arg splitting issues
     const proc = spawn(ytDlpPath, args);
-
     proc.stdout.pipe(res);
-
-    proc.stderr.on('data', (data) => {
-        console.error('yt-dlp:', data.toString().trim());
-    });
-
+    proc.stderr.on('data', (d) => console.error('yt-dlp:', d.toString().trim()));
     proc.on('error', (err) => {
         console.error('Process error:', err.message);
-        if (!res.headersSent) {
-            res.status(500).json({ error: 'Download failed' });
-        }
+        if (!res.headersSent) res.status(500).json({ error: 'Download failed' });
     });
-
-    proc.on('close', (code) => {
-        if (code !== 0) console.error(`yt-dlp exited with code ${code}`);
-    });
-
-    req.on('close', () => {
-        try { proc.kill(); } catch {}
-    });
+    proc.on('close', (code) => { if (code !== 0) console.error(`yt-dlp exited with code ${code}`); });
+    req.on('close', () => { try { proc.kill(); } catch {} });
 });
 
 // ============================================================
@@ -230,33 +246,18 @@ app.get('/api/download-merge', (req, res) => {
         '-f', `${formatId}+bestaudio`,
         '--merge-output-format', 'mp4',
         '-o', '-',
-        '--no-check-certificates',
-        '--no-warnings',
-        '--ffmpeg-location', ffmpegPath,
+        ...getBaseArgs(),
     ];
 
     const proc = spawn(ytDlpPath, args);
-
     proc.stdout.pipe(res);
-
-    proc.stderr.on('data', (data) => {
-        console.error('yt-dlp:', data.toString().trim());
-    });
-
+    proc.stderr.on('data', (d) => console.error('yt-dlp:', d.toString().trim()));
     proc.on('error', (err) => {
         console.error('Process error:', err.message);
-        if (!res.headersSent) {
-            res.status(500).json({ error: 'Download failed' });
-        }
+        if (!res.headersSent) res.status(500).json({ error: 'Download failed' });
     });
-
-    proc.on('close', (code) => {
-        if (code !== 0) console.error(`yt-dlp exited with code ${code}`);
-    });
-
-    req.on('close', () => {
-        try { proc.kill(); } catch {}
-    });
+    proc.on('close', (code) => { if (code !== 0) console.error(`yt-dlp exited with code ${code}`); });
+    req.on('close', () => { try { proc.kill(); } catch {} });
 });
 
 // ============================================================
